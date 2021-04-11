@@ -25,6 +25,6 @@ The main training process is shown in the ``Train EASE EF.ipynb`` file for early
 ## Testing & Visualization
 To test the model, [``Testing.ipynb``](Testing.ipynb) shows the performance and the spectrogram of some specific models in specific test sample.
 
-[``analyze``](utils.py#316) can calculate the average of PESQ, STOI and ESTOI. And save the results in the Evaluation folder.
+[``analyze``](utils.py#L316) can calculate the average of PESQ, STOI and ESTOI. And save the results in the Evaluation folder.
 
-[``avg_analyze``](utils.py#502) can show the average performance of the selected models on the specific metrics in a bar chart.
+[``avg_analyze``](utils.py#L502) can show the average performance of the selected models on the specific metrics in a bar chart.
