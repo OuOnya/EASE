@@ -20,7 +20,7 @@ See [``main.py``](main.py) for more detailed training settings.
 For the model structure.
 You can freely construct a multimodel according to the specifications of [MultiModal_SE](model.py#L35) input parameters.
 
-The main training process is shown in the [``Train EASE EF.ipynb``](Train_EASE_EF.ipynb) file for early fusion model and [``Train EASE LF.ipynb``](Train_EASE_LF.ipynb) file for late fusion model.
+The main training process is shown in the ``Train EASE EF.ipynb`` file for early fusion model and ``Train EASE LF.ipynb`` file for late fusion model.
 
 ## Testing & Visualization
 To test the model, [``Testing.ipynb``](Testing.ipynb) shows the performance and the spectrogram of some specific models in specific test sample.
