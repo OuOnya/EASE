@@ -2,27 +2,4 @@ __pycache__/
 
 .ipynb_checkpoints
 
-checkpoint/AutoEncoder/*
-!checkpoint/AutoEncoder/PCA_AE16_BiLSTM32_L6NR S.pt
-!checkpoint/AutoEncoder/PCA_AE16_BiLSTM32_L12NR S.pt
-!checkpoint/AutoEncoder/PCA16.pkl
-
-checkpoint/MultiModal/*
-!checkpoint/MultiModal/S+E CNN512 PCA_AE6 LF cat2 LSTM_384_Linear (norm n100 fix) (zero_pad).pt
-!checkpoint/MultiModal/S+E CNN512 EF cat0 LSTM_384_Linear (norm).pt
-
 Enhanced
-
-Evaluation/*
-!Evaluation/S CNN512 LSTM_384_Linear (norm)
-!Evaluation/S+E CNN512 PCA_AE6 LF cat2 LSTM_384_Linear (norm n100 fix) (zero_pad)
-!Evaluation/S+E CNN512 EF cat0 LSTM_384_Linear (norm)
-
-test_pos
-train_pos
-
-OldAutoEncoder.ipynb
-mix_SNR.ipynb
-Multimodel.ipynb
-Testing2.ipynb
-Run parallel 1.ipynb
