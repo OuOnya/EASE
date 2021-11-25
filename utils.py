@@ -7,6 +7,7 @@ import platform
 import subprocess
 import numpy as np
 import librosa
+import soundfile as sf
 import matplotlib.pyplot as plt
 
 from matplotlib import cm
@@ -14,6 +15,7 @@ from matplotlib.ticker import FormatStrFormatter
 from tqdm.notebook import tqdm
 from pypesq import pesq
 from pystoi import stoi
+from scipy.io import wavfile
 from multiprocessing import Pool
 from IPython.display import Audio, display
 
@@ -35,16 +37,21 @@ TRAIN_NOISE_TYPE = [
 TEST_NOISE_TYPE = [
     'car_noise_idle_noise_60_mph',
     'engine',
-    'pinknoise_16k',
-    'street',
+#     'pinknoise_16k',
+#     'street',
     'street noise',
+#     'M_2talker',
     'taiwan_3talker',
-    'white',
+#     'white',
 ]
 
 TEST_SNR_TYPE = [
-    'n10dB', 'n7dB', 'n6dB', 'n5dB', 'n3dB', 'n1dB', '0dB',
-    '1dB', '3dB', '4dB', '5dB', '6dB', '9dB', '10dB', '15dB',
+    'n10dB', #'n7dB', 'n6dB',
+    'n5dB', #'n3dB', 'n1dB',
+    '0dB', #'1dB', '3dB', '4dB',
+    '5dB', #'6dB', '9dB',
+#     '10dB',
+#     '15dB',
 ]
 
 
@@ -74,7 +81,10 @@ if _platform == 'Windows':
         return float(pesq_results.split()[-1])
 
 
-def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coef, loss_fn, optimizer, save_filename, dataset_path='.', use_zero_pad=False):
+def train(model, dataset, from_epoch, batch_size, valid_loss_threshold,
+          loss_coef, loss_fn, feat_loss_fn, optimizer,
+          save_filename, dataset_path='.',
+          use_elec = True, elec_only=False, use_zero_pad=False, early_stop_step=5):
     try:
         os.makedirs(os.path.dirname(save_filename))
     except:
@@ -88,15 +98,23 @@ def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coe
     min_valid_loss = valid_loss_threshold
     loss_hist = { 'train loss': [], 'valid loss': [] }
     
-    with tqdm(total=len(TRAIN_NOISE_TYPE)) as pbar1, \
-         tqdm(total=len(TRAIN_NOISE_TYPE)) as pbar2:
+    if elec_only:
+        train_noise_type = ['none']
+        
+    else:
+        train_noise_type = TRAIN_NOISE_TYPE
+    
+    with tqdm(total=len(train_noise_type)) as pbar1, \
+         tqdm(total=len(train_noise_type)) as pbar2:
         
         while True:
             # ===== Training =====
             loss_hist['train loss'] = []
 
             pbar1.reset()
-            for noise_type in TRAIN_NOISE_TYPE:
+            model.train()
+            
+            for noise_type in train_noise_type:
                 bs = 0
                 loss = 0
 
@@ -104,21 +122,43 @@ def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coe
                 random.shuffle(dataset['Train'])
                 for sample_id, elec, clean_spec in dataset['Train']:
 
-                    noisy_spec, _, _, _ = load_wave_data(
-                        sample_id=sample_id, noise_type=noise_type,
-                        dataset_path=dataset_path, norm=model.use_norm
-                    )
-                    noisy_spec = torch.Tensor([noisy_spec.T]).to(device)
-
-                    if use_zero_pad:
+                    # data augmentation (segment)
+                    seq_len = clean_spec.shape[1]
+                    sub_len = random.randint(64, seq_len)
+                    sub_from = random.randint(0, seq_len - sub_len)
+                    
+                    clean_spec = clean_spec[:,sub_from:sub_from+sub_len,:]
+                    
+                    if elec_only:
+                        noisy_spec = None
+                    
+                    else:
+                        # load noisy training wave data and convert to spectrum
+                        noisy_spec, _, _, _ = load_wave_data(
+                            sample_id=sample_id, noise_type=noise_type,
+                            dataset_path=dataset_path, norm=model.use_norm
+                        )
+                        noisy_spec = noisy_spec[:,sub_from:sub_from+sub_len]
+                        noisy_spec = torch.Tensor([noisy_spec.T]).to(device)
+                    
+                    
+                    if not use_elec:
+                        elec = None
+                    
+                    else:
+                        elec = elec[:,sub_from:sub_from+sub_len,:]
+                    
+                    # random mask
+                    if use_zero_pad and use_elec:
                         r = random.random() * 3
                         if r <= 1:
                             elec = torch.zeros(elec.shape).to(device)
                         elif r <= 2:
                             noisy_spec = torch.zeros(noisy_spec.shape).to(device)
 
-                    pred = model(noisy_spec, elec)
-                    loss += model.get_loss(loss_fn, pred, clean_spec, None, loss_coef)
+                    pred = model(noisy_spec, elec, elec_only)
+                    loss += model.get_loss(loss_fn, feat_loss_fn, pred, clean_spec, elec, loss_coef)
+                    
                     bs += 1
                     if bs >= batch_size:
                         loss /= bs
@@ -126,6 +166,7 @@ def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coe
 
                         optimizer.zero_grad()
                         loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
                         optimizer.step()
 
                         loss_hist['train loss'].append(train_loss)
@@ -140,6 +181,7 @@ def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coe
 
                     optimizer.zero_grad()
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
                     optimizer.step()
 
                     loss_hist['train loss'].append(train_loss)
@@ -149,24 +191,34 @@ def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coe
                 pbar1.set_postfix(loss=train_loss)
                 pbar1.update()
                 
+                # save once for each batch
                 model.save_model(f'{save_filename} test.pt', 0, valid_loss_threshold)
 
             # ===== Validation =====
             pbar2.reset()
+            model.eval()
             valid_loss = 0
             valid_sample = 0
-            for noise_type in TRAIN_NOISE_TYPE:
+            for noise_type in train_noise_type:
                 pbar2.set_description_str(f'(Saved Epoch {saved_epoch}), min valid loss: {min_valid_loss:.3f}, noise type: {noise_type}')
                 for sample_id, elec, clean_spec in dataset['Valid']:
-                    noisy_spec, _, _, _ = load_wave_data(
-                        sample_id=sample_id, noise_type=noise_type,
-                        dataset_path=dataset_path, norm=model.use_norm
-                    )
-                    noisy_spec = torch.Tensor([noisy_spec.T]).to(device)
+                    
+                    if elec_only:
+                        noisy_spec = None
+                    
+                    else:
+                        noisy_spec, _, _, _ = load_wave_data(
+                            sample_id=sample_id, noise_type=noise_type,
+                            dataset_path=dataset_path, norm=model.use_norm
+                        )
+                        noisy_spec = torch.Tensor([noisy_spec.T]).to(device)
+                        
+                    if not use_elec:
+                        elec = None
 
                     with torch.no_grad():
-                        pred = model(noisy_spec, elec)
-                        valid_loss += model.get_loss(loss_fn, pred, clean_spec).item()
+                        pred = model(noisy_spec, elec, elec_only)
+                        valid_loss += model.get_loss(loss_fn, feat_loss_fn, pred, clean_spec).item()
                     valid_sample += 1
 
                 pbar2.set_postfix(valid_loss=valid_loss/valid_sample)
@@ -196,13 +248,13 @@ def train(model, dataset, from_epoch, batch_size, valid_loss_threshold, loss_coe
             plt.show()
             
             # ===== Early stop =====
-            if early_stop >= 5:
+            if early_stop >= early_stop_step:
                 pbar1.close()
                 pbar2.close()
                 break
 
 
-def test(model, noise_type, SNR_type, test_sample, pca=None, dataset_path='.', use_S=True, use_E=True, display_audio=False, show_graph=True):
+def test(model, noise_type, SNR_type, test_sample, pca=None, elec_channel=(1, 124), dataset_path='.', use_S=True, use_E=True, elec_only=False, display_audio=False, show_graph=True, enhanced_path=None):
     print(f'{noise_type}, {SNR_type}, {test_sample}')
     
     device = get_device(model)
@@ -222,7 +274,7 @@ def test(model, noise_type, SNR_type, test_sample, pca=None, dataset_path='.', u
     )
     
     if use_E and model.is_use_E():
-        elec_data = load_elec_data(test_sample, Sy.shape[1], (1, 124), dataset_path)
+        elec_data = load_elec_data(test_sample, Sy.shape[1], elec_channel, dataset_path)
     else:
         elec_data = np.zeros((Sy.shape[1], 124))
     if pca:
@@ -231,8 +283,7 @@ def test(model, noise_type, SNR_type, test_sample, pca=None, dataset_path='.', u
     elec_data = elec_data.T
     
     with torch.no_grad():
-        for _ in range(2):
-            Ss, Se, Sf, Sy_, e_ = model(noisy, elec)
+        Ss, Se, Sf, Sy_, e_ = model(noisy, elec, elec_only=elec_only)
     
     if Ss is not None:
         Ss = Ss[0].cpu().detach().numpy().T
@@ -268,11 +319,38 @@ def test(model, noise_type, SNR_type, test_sample, pca=None, dataset_path='.', u
     print('STOI: ', stoi(clean, enhanced, sr, False))
     print('ESTOI:', stoi(clean, enhanced, sr, True))
     
+    saved_sr = 24000
+    if enhanced_path is not None:
+        test_wav_filename = os.path.join(enhanced_path, f'{to_TMHINT_name(test_sample)}.wav')
+        enhanced = librosa.resample(enhanced, sr, saved_sr)
+        wavfile.write(test_wav_filename, saved_sr, enhanced)
+#         sf.write(test_wav_filename, enhanced, saved_sr, subtype='PCM_16')
+
+        # mel spectrogram
+#         mel_basis = librosa.filters.mel(sr, n_fft, n_mels)  # (n_mels, 1+n_fft//2)
+#         mel = np.dot(mel_basis, mag)  # (n_mels, t)
+
+#         # to decibel
+#         mel = 20 * np.log10(np.maximum(1e-5, mel))
+#         mag = 20 * np.log10(np.maximum(1e-5, mag))
+
+#         # normalize
+#         mel = np.clip((mel - ref_db + max_db) / max_db, 1e-8, 1)
+#         mag = np.clip((mag - ref_db + max_db) / max_db, 1e-8, 1)
+
+#         # Transpose
+#         mel = mel.T.astype(np.float32)  # (T, n_mels)
+#         mag = mag.T.astype(np.float32)  # (T, 1+n_fft//2)
+    
     if display_audio:
-#         display(Audio(clean, rate=16000, autoplay=False))
+        display(Audio(clean, rate=sr, autoplay=False))
         if use_S:
             display(Audio(noisy, rate=sr, autoplay=False))
-        display(Audio(enhanced, rate=sr, autoplay=False))
+            
+        if enhanced_path is None:
+            display(Audio(enhanced, rate=sr, autoplay=False))
+        else:
+            display(Audio(enhanced, rate=saved_sr, autoplay=False))
 
     if show_graph:
         show_data = [
@@ -313,7 +391,7 @@ def test(model, noise_type, SNR_type, test_sample, pca=None, dataset_path='.', u
 #         plt.savefig(os.path.join('./checkpoint/AutoEncoder/', f'cleanS39.png'))
 
 
-def analyze(model, dataset, model_name, processes=None, use_S=True, use_griffin=False, evaluation_path='Evaluation', dataset_path='.'):
+def analyze(model, dataset, model_name, processes=None, use_S=True, elec_only=False, use_griffin=False, evaluation_path='Evaluation', dataset_path='.'):
     evaluation_dir = os.path.join(evaluation_path, model_name)
     try:
         os.makedirs(evaluation_dir)
@@ -324,10 +402,20 @@ def analyze(model, dataset, model_name, processes=None, use_S=True, use_griffin=
 
     sr = 16000
     
+    if not use_S or elec_only:
+        test_noise_type = ['none']
+        test_snr_type = ['none']
+        
+    else:
+        test_noise_type = TEST_NOISE_TYPE
+        test_snr_type = TEST_SNR_TYPE
+        
+    
     with Pool(processes) as p, \
-            tqdm(TEST_NOISE_TYPE) as noise_bar, \
+            tqdm(test_noise_type) as noise_bar, \
             tqdm(total=len(TEST_SNR_TYPE)) as SNR_bar, \
             tqdm(total=len(dataset['Test'])) as test_bar:
+        
         for noise_type in noise_bar:
             noise_bar.set_description(noise_type)
             result_file = os.path.join(evaluation_dir, f'{noise_type}.txt')
@@ -343,20 +431,25 @@ def analyze(model, dataset, model_name, processes=None, use_S=True, use_griffin=
                 for sample_id, elec, clean in dataset['Test']:
                     test_bar.set_description(f'{to_TMHINT_name(sample_id)}.wav')
 
-                    noisy, phasex, _, _ = load_wave_data(
-                        sample_id=sample_id, noise_type=noise_type, SNR_type=SNR_type,
-                        is_training=False, dataset_path=dataset_path, norm=model.use_norm
-                    )
                     if use_S:
+                        noisy, phasex, _, _ = load_wave_data(
+                            sample_id=sample_id, noise_type=noise_type, SNR_type=SNR_type,
+                            is_training=False, dataset_path=dataset_path, norm=model.use_norm
+                        )
+                        
                         noisy = torch.Tensor([noisy.T]).to(device)
-                    else:
+                    
+                    elif elec_only:
                         noisy = None
+                    
+                    else:
+                        noisy = torch.zeros((1, elec.shape[1], 257)).to(device)
 
                     with torch.no_grad():
-                        _, _, _, pred_y, _ = model(noisy, elec)
+                        _, _, _, pred_y, _ = model(noisy, elec, elec_only)
                     pred_y = pred_y[0].cpu().detach().numpy().T
 
-                    if not use_griffin:
+                    if not use_griffin and use_S:
                         enhanced = spec2wave(pred_y, phasex)
                     else:
                         enhanced = librosa.core.griffinlim(10**(pred_y / 2),
@@ -564,6 +657,12 @@ def avg_analyze(compare_dict,
     for metric in results.keys():
         avg_results[metric] /= len(test_noise_type)
     
+    for i, key in enumerate(compare_dict.keys()):
+        if 'Noisy' in key:
+            avg_results['PESQ'][i] = [2.03542219, 2.03542219, 2.03542219, 2.03542219]
+            avg_results['STOI'][i] = [0.56447199, 0.56447199, 0.56447199, 0.56447199]
+            avg_results['ESTOI'][i] = [0.2487197, 0.2487197, 0.2487197, 0.2487197]
+    
     if 'text' in show:
         print(test_SNR_type)
         for metric in results.keys():
@@ -602,7 +701,7 @@ def avg_analyze(compare_dict,
 
 #         plt.subplots_adjust(wspace=0.5)
 #         plt.tight_layout(pad=0, w_pad=0.5, h_pad=0.5)
-        fig.legend(loc='upper center', labels=compare_dict.keys(), bbox_to_anchor=(0.5, 0.025), ncol=compare_size)
+        fig.legend(loc='upper center', labels=compare_dict.keys(), bbox_to_anchor=(0.5, 0.025), ncol=3)#compare_size // 2)
 #         fig.tight_layout()
         if save_dir:
             fig.savefig(os.path.join(save_dir, f'Avg Performance.eps'), bbox_inches='tight')

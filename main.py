@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 from const import Const
 from preprocess import cache_clean_data
-from model import AutoEncoder, MultiModal_SE, Reshape, Unsqueeze, Squeeze, SeqUnfold, SeqUnfold_Reshape, SeqFlatten, ResCNN
+from model import AutoEncoder, MultiModal_SE, Reshape, Unsqueeze, Squeeze, SeqUnfold, SeqUnfold_Reshape, SeqFlatten, ResCNN, TransformerModel
 from utils import TRAIN_NOISE_TYPE, TEST_NOISE_TYPE, TEST_SNR_TYPE, train, test, analyze, show_analyze, avg_analyze
 
 
@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser(
 )
 
 # ===== training =====
-parser.add_argument('--dataset_path', type=str, default='../../Dataset/', help='the dataset folder.')
+parser.add_argument('--dataset_path', type=str, default='../Dataset/', help='the dataset folder.')
 parser.add_argument('--AE_checkpoint_path', type=str, default='./checkpoint/AutoEncoder/', help='the checkpoint folder for the autoencoder.')
 parser.add_argument('--MM_checkpoint_path', type=str, default='./checkpoint/MultiModal/', help='the checkpoint folder for the MultiModal.')
 parser.add_argument('--AE_name', type=str, default='AE124_BiLSTM12NR S', help='the name of the autoencoder model.')
@@ -28,7 +28,7 @@ parser.add_argument('--train', action='store_true', help='to train the model.')
 parser.add_argument('--split_ratio', type=float, default=0.896, help='the ratio of splitting the training set into training/validation sets.')
 parser.add_argument('--frame_seq', type=int, default=5, help='the frames amount of model input.')
 parser.add_argument('--batch_size', type=int, default=1, help='the batch size wanted to be trained.')
-parser.add_argument('--loss_coef', type=float, default=0.001, help='loss = noisy_loss + loss_coefficient * elec_loss')
+parser.add_argument('--loss_coef', type=float, default=0.1, help='loss = noisy_loss + loss_coefficient * elec_loss')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate of the optimizer.')
 parser.add_argument('--loss', type=str, default='MSE', help='option: MSE')
 parser.add_argument('--opt', type=str, default='Adam', help='option: Adam')

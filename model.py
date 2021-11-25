@@ -6,6 +6,8 @@ import math
 import itertools
 
 from collections import OrderedDict
+from torch.nn.utils import weight_norm
+
 
 def get_device(model):
     try:
@@ -85,56 +87,75 @@ class MultiModal_SE(nn.Module):
         
         self.use_norm = use_norm
     
-    def forward(self, s, e):
+    def forward(self, s, e, elec_only=False):
         # Make sure all data exists.
-        if s is None and e is not None:
+        if s is None and e is not None and self.S_Encoder is not None:
             device = get_device(self)
             s = torch.zeros((1, e.shape[1], 257)).to(device)
         
-        if self.E_Encoder is not None:
-            if e is None and s is not None:
-                device = get_device(self)
-                e = torch.zeros((1, s.shape[1], 124)).to(device)
-            
-            h_e = forward_submodule(self.E_Encoder, e)
-            
-            if self.is_late_fusion:
-                # In late fusion, we mix the information of h_s and h_e
-                h_s = forward_submodule(self.S_Encoder, s)
-            else:
-                # In early fusion, we mix the information of s and h_e
-                h_s = s
-            
-            # fution type (Default: 'concat')
-            if self.fusion_type in 'concatenate':
-                # concat position: 0 for channel, -1 for frequency domain (Default: -1)
-                h = torch.cat((h_s, h_e), dim=self.fusion_channel)
+        if e is None and s is not None and self.E_Encoder is not None:
+            device = get_device(self)
+            e = torch.zeros((1, s.shape[1], 124)).to(device)
 
-            elif self.fusion_type in 'mean':
-                h = (h_s + h_e) / 2
+        h_e = forward_submodule(self.E_Encoder, e)
 
-            elif self.fusion_type in 'mask':
-                h = torch.mul(h_s, h_e)
-                h_e = h
-
-            h_f = forward_submodule(self.Fusion_layer, h)
-            y_ = forward_submodule(self.S_Decoder, h_f)
-            e_ = forward_submodule(self.E_Decoder, h_f)
-            
-            if self.is_late_fusion:
-                return h_s, h_e, h_f, y_, e_
-            return None, h_e, h_f, y_, e_
-
-        else:
+        if self.is_late_fusion:
+            # In late fusion, we mix the information of h_s and h_e
             h_s = forward_submodule(self.S_Encoder, s)
-            y_ = forward_submodule(self.S_Decoder, h_s)
-            e_ = forward_submodule(self.E_Decoder, h_s)
-            return h_s, None, None, y_, e_
+        else:
+            # In early fusion, we mix the information of s and h_e
+            h_s = s
+
+        
+        if h_s is None or elec_only:
+            # EPG to Speech (EPG2S)
+            h = h_e
+        
+        elif h_e is None:
+            # Speech Enhancement (baseline)
+            h = h_s
+
+        elif self.fusion_type in 'concatenate':
+            # fution type (Default: 'concat')
+            # concat position: 0 for channel, -1 for frequency domain (Default: -1)
+            h = torch.cat((h_s, h_e), dim=self.fusion_channel)
+
+        elif self.fusion_type in 'mean':
+            h = (h_s + h_e) / 2
+
+        elif self.fusion_type in 'mask':
+            h = torch.mul(h_s, h_e)
+            h_e = h
+
+        h_f = forward_submodule(self.Fusion_layer, h)
+        
+        if h_f is None:
+            h_f = forward_submodule(self.S_Encoder, h_s)
+            y_ = forward_submodule(self.S_Decoder, h_f)
+        else:
+            y_ = forward_submodule(self.S_Decoder, h_f)
+            
+        e_ = forward_submodule(self.E_Decoder, h_f)
+
+        if self.is_late_fusion:
+            return h_s, h_e, h_f, y_, e_
+        return s, h_e, h_f, y_, e_
+
+#         else:
+#             h_s = forward_submodule(self.S_Encoder, s)
+#             y_ = forward_submodule(self.S_Decoder, h_s)
+#             e_ = forward_submodule(self.E_Decoder, h_s)
+#             return h_s, None, None, y_, e_
     
-    def get_loss(self, loss_fn, pred_y, true_y, true_e=None, lamb=0.1):
+    def get_loss(self, loss_fn, feat_loss_fn, pred_y, true_y, true_e=None, lamb=0.1):
         loss = loss_fn(pred_y[-2], true_y)
+        
         if pred_y[-1] is not None and true_e is not None:
             loss += lamb * loss_fn(pred_y[-1], true_e)
+            
+        if feat_loss_fn is not None and pred_y[1] is not None and pred_y[0] is not None:
+            loss += lamb * feat_loss_fn(pred_y[1], pred_y[0])
+        
         return loss
     
     def is_use_E(self):
@@ -409,3 +430,193 @@ class WienerCNN(nn.Module):
                 h = module(h)
         
         return h
+
+
+class TransformerModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, nhead, num_encoder_layers=2, num_decoder_layers=2, dropout=0.1, bidirectional=False):
+        super(TransformerModel, self).__init__()
+        
+        # Models
+        self.encoder_embedding = nn.Linear(input_size, hidden_size)
+        self.decoder_embedding = nn.Linear(output_size, hidden_size)
+        self.pos_encoder = PositionalEncoding(hidden_size, dropout)
+        
+        encoder_layer = nn.TransformerEncoderLayer(hidden_size, nhead, dropout=dropout)
+        encoder_norm = nn.LayerNorm(hidden_size)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+        
+        decoder_layer = nn.TransformerDecoderLayer(hidden_size, nhead, dropout=dropout)
+        decoder_norm = nn.LayerNorm(hidden_size)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm)
+        
+        self.L1 = nn.Linear(hidden_size, output_size, bias=False)
+        self.relu = nn.LeakyReLU(negative_slope=0.3, inplace=True)
+        
+        # init model weights
+        self.init_weights()
+    
+        # parameter
+        self.hidden_size = hidden_size
+        self.scalar = math.sqrt(hidden_size)
+        
+        self.bidirectional = bidirectional
+    
+    def generate_square_subsequent_mask(self, sz):
+        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+    
+    def init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+#         initrange = 0.1
+#         self.L1.weight.data.uniform_(-initrange, initrange)
+#         self.L2.bias.data.zero_()
+#         self.L2.weight.data.uniform_(-initrange, initrange)
+
+    def forward(self, src, tgt): #, src_mask):
+        '''
+        Shape:
+        - Input:
+            src  :math:`(Batch, Seq, hidden_size)`
+
+        - Output: :math:`(Batch, Seq, hidden_size)`
+        '''
+        
+        src = src.transpose(0, 1)
+        tgt = tgt.transpose(0, 1)
+        
+        src = self.encoder_embedding(src) * self.scalar
+        src = self.pos_encoder(src)
+        
+        tgt = torch.roll(tgt, 1, 0)
+        tgt[0,:] = 0
+        tgt = self.decoder_embedding(tgt) * self.scalar
+        tgt = self.pos_encoder(tgt)
+        
+        device = get_device(self)
+        mask = self.generate_square_subsequent_mask(src.size(0)).to(device)
+        
+        if self.bidirectional:
+            memory = self.encoder(src, mask=None)
+        else:
+            memory = self.encoder(src, mask=mask)
+        
+        output = self.decoder(tgt, memory, tgt_mask=mask, memory_mask=mask)
+        
+        output = self.relu(self.L1(output))
+        output = output.transpose(0, 1)
+        
+        return output
+    
+    def evaluate(self, src):
+        src = src.transpose(0, 1)
+
+        src = self.encoder_embedding(src) * self.scalar
+        src = self.pos_encoder(src)
+
+        device = get_device(self)
+        mask = self.generate_square_subsequent_mask(src.size(0)).to(device)
+
+        if self.bidirectional:
+            memory = self.encoder(src, mask=None)
+        else:
+            memory = self.encoder(src, mask=mask)
+
+        output = torch.zeros((1, 1, 512)).to(device)
+
+        for _ in range(src.size(0)):
+            output[_,:] = output[_,:] + self.pos_encoder.pe[_, :]
+            mask = (torch.triu(torch.ones(src.size(0), output.size(0))) == 1).transpose(0, 1)
+            mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+            mask = mask.to(device)
+            pred = self.decoder(output, memory, memory_mask=mask)
+            output = torch.cat((output, pred[-1].unsqueeze(0)), 0)
+        
+#         output = torch.zeros(src.shape).to(device)
+
+#         for _ in range(src.size(0)):
+#             output[_,:] = output[_,:] + self.pos_encoder.pe[_, :]
+#             pred = self.decoder(output, memory, tgt_mask=mask, memory_mask=mask)
+#             output[_,:] = pred[_,:]
+
+        output = self.relu(self.L1(output[1:]))
+        output = output.transpose(0, 1)
+        
+        return output
+        
+    
+    def get_loss(self, loss_fn, feat_loss_fn, pred_y, true_y, true_e=None, lamb=0.1):
+        loss = loss_fn(pred_y[-2], true_y)
+        
+        if pred_y[-1] is not None and true_e is not None:
+            loss += lamb * loss_fn(pred_y[-1], true_e)
+            
+        if feat_loss_fn is not None and pred_y[1] is not None and pred_y[0] is not None:
+            loss += lamb * feat_loss_fn(pred_y[1], pred_y[0])
+        
+        return loss
+    
+    def load_model(self, filename, device=None):
+        epoch, valid_loss = 0, 1e9
+        try:
+            state_dict = torch.load(filename, map_location=device)
+            
+            self.encoder_embedding = state_dict.get('encoder_embedding', self.encoder_embedding)
+            self.decoder_embedding = state_dict.get('decoder_embedding', self.decoder_embedding)
+            self.encoder = state_dict.get('encoder', self.encoder)
+            self.decoder = state_dict.get('decoder', self.decoder)
+            self.L1 = state_dict.get('L1', self.L1)
+            
+            self.hidden_size = state_dict.get('hidden_size', self.hidden_size)
+            self.scalar = math.sqrt(self.hidden_size)
+            self.bidirectional = state_dict.get('bidirectional', self.bidirectional)
+            
+            epoch = state_dict.get('epoch', epoch)
+            valid_loss = state_dict.get('valid_loss', valid_loss)
+            print(f"Model '{filename}' loaded.")
+            
+        except Exception as e:
+            print(e)
+        
+        self.to(device)
+        return self, epoch, valid_loss
+    
+    def save_model(self, filename, epoch=0, valid_loss=1e9):
+        state_dict = {
+            'encoder_embedding': self.encoder_embedding,
+            'decoder_embedding': self.decoder_embedding,
+            'encoder': self.encoder,
+            'decoder': self.decoder,
+            'L1': self.L1,
+            
+            'hidden_size': self.hidden_size,
+            'bidirectional': self.bidirectional,
+            
+            'epoch': epoch,
+            'valid_loss': valid_loss,
+        }
+    
+        torch.save(state_dict, filename)
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+#         pe = torch.randn((max_len, 1, d_model), requires_grad=True)
+#         pe.data.uniform_(-1, 1)
+        self.register_buffer('pe', pe)
+#         nn.init.xavier_uniform_(pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)

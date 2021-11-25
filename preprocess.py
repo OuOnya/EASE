@@ -81,7 +81,10 @@ def load_elec_data(sample_id, cutoff, elec_channel, dataset_path='.'):
     
     # ===== Extract channels and time shift =====
     # numpy shape: (spec signal length, electrodes)
-    elec = elec[:cutoff-Const.SHIFT, elec_channel[0]:elec_channel[1]+1]
+    if isinstance(elec_channel, tuple):
+        elec = elec[:cutoff-Const.SHIFT, elec_channel[0]:elec_channel[1]+1]
+    elif isinstance(elec_channel, list):
+        elec = elec[:cutoff-Const.SHIFT, elec_channel]
     elec = np.vstack([np.zeros((Const.SHIFT, elec.shape[1])), elec])
     return elec
 
@@ -132,6 +135,10 @@ def cache_clean_data(elec_preprocessors=None, is_training=True, split_ratio=1, d
         elif isinstance(elec_preprocessor, tuple) and len(elec_preprocessor) == 2:
             elec_channel = elec_preprocessor
             hidden_size = elec_channel[1] - elec_channel[0] + 1
+
+        elif isinstance(elec_preprocessor, list):
+            elec_channel = elec_preprocessor
+            hidden_size = len(elec_preprocessor)
 
         elif isinstance(elec_preprocessor, PCA):
             pca = elec_preprocessor
