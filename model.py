@@ -15,6 +15,7 @@ def get_device(model):
     except:
         return 'cpu'
 
+    
 def forward_submodule(module, data):
     '''
     Assist RNN-based modules to pass forward in nn.Sequential recursively.
